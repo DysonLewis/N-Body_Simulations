@@ -8,7 +8,14 @@ import os
 AU = 1.496e13
 yr = 3.15576e7
 
-plot_dir = '/home/dyson/fall25/ASTRO142_Proj3/plots'
+def get_project_root():
+    """Resolve the project root from the script location or current working directory."""
+    if "__file__" in globals():
+        return os.path.dirname(os.path.abspath(__file__))
+    return os.path.abspath(os.getcwd())
+
+
+plot_dir = os.path.join(get_project_root(), "plots")
 os.makedirs(plot_dir, exist_ok=True)
 
 

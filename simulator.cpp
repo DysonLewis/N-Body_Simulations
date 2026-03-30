@@ -115,7 +115,7 @@ static double compute_adaptive_timestep(const std::vector<double>& X,
     
     // Don't let timestep get too small (would take forever)
     // Also don't let it get too large (instability)
-    min_dt = std::max(min_dt, base_dt * 1e-4);  // Allow down to x of base_dt
+    min_dt = std::max(min_dt, base_dt * 1e-5);  // Allow down to x of base_dt
     min_dt = std::min(min_dt, base_dt);
     
     return min_dt;

@@ -1,4 +1,3 @@
-*.so
 *.csv
 *.fits
 __pycache__/
@@ -8,3 +7,10 @@ phase1.md
 phase2.md
 *.pdf
 *.png
+
+# Compiled native build artifacts
+compiled/*
+!compiled/.gitkeep
+*.so
+*.o
+*.pyc

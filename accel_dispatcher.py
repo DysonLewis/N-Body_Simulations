@@ -18,15 +18,19 @@ import warnings
 
 
 _MODULE_DIR = Path(__file__).resolve().parent
+_BUILD_DIR = _MODULE_DIR / "compiled"
 _FORCE_CPU = os.environ.get("NBODY_FORCE_CPU", "0") == "1"
 
 
 def _find_extension_path(stem: str) -> Path:
     for suffix in importlib.machinery.EXTENSION_SUFFIXES:
-        candidate = _MODULE_DIR / f"{stem}{suffix}"
-        if candidate.exists():
-            return candidate
-    raise ImportError(f"Could not find compiled extension for {stem!r} in {_MODULE_DIR}")
+        for directory in (_BUILD_DIR, _MODULE_DIR):
+            candidate = directory / f"{stem}{suffix}"
+            if candidate.exists():
+                return candidate
+    raise ImportError(
+        f"Could not find compiled extension for {stem!r} in {_BUILD_DIR} or {_MODULE_DIR}"
+    )
 
 
 def _load_extension_with_init_name(module_name: str, path: Path) -> ModuleType:
@@ -53,13 +57,13 @@ def _load_cpu_accel_backend() -> ModuleType:
 
 def _load_cpu_backend() -> tuple[ModuleType, ModuleType, str]:
     accel_backend = _load_cpu_accel_backend()
-    sim_backend = importlib.import_module("simulator")
+    sim_backend = _load_extension_with_init_name("simulator", _find_extension_path("simulator"))
     return accel_backend, sim_backend, "CPU (forced)" if _FORCE_CPU else "CPU"
 
 
 def _load_gpu_backend() -> tuple[ModuleType, ModuleType, str]:
-    accel_backend = importlib.import_module("accel_gpu")
-    sim_backend = importlib.import_module("simulator_gpu")
+    accel_backend = _load_extension_with_init_name("accel_gpu", _find_extension_path("accel_gpu"))
+    sim_backend = _load_extension_with_init_name("simulator_gpu", _find_extension_path("simulator_gpu"))
     return accel_backend, sim_backend, "GPU"
 
 

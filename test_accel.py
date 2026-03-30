@@ -15,26 +15,28 @@ CPU_G = 6.67259e-8
 GPU_G = 6.67430e-8
 COLLISION_RADIUS = 1.0e10
 MODULE_DIR = Path(__file__).resolve().parent
+BUILD_DIR = MODULE_DIR / "compiled"
 
 
 def load_native_extension(module_name):
     for suffix in importlib.machinery.EXTENSION_SUFFIXES:
-        candidate = MODULE_DIR / f"{module_name}{suffix}"
-        if candidate.exists():
-            spec = importlib.util.spec_from_file_location(module_name, candidate)
-            if spec is None or spec.loader is None:
-                raise ImportError(f"Could not create import spec for {candidate}")
-            module = importlib.util.module_from_spec(spec)
-            previous = sys.modules.get(module_name)
-            sys.modules[module_name] = module
-            try:
-                spec.loader.exec_module(module)
-            finally:
-                if previous is not None:
-                    sys.modules[module_name] = previous
-                else:
-                    sys.modules.pop(module_name, None)
-            return module
+        for directory in (BUILD_DIR, MODULE_DIR):
+            candidate = directory / f"{module_name}{suffix}"
+            if candidate.exists():
+                spec = importlib.util.spec_from_file_location(module_name, candidate)
+                if spec is None or spec.loader is None:
+                    raise ImportError(f"Could not create import spec for {candidate}")
+                module = importlib.util.module_from_spec(spec)
+                previous = sys.modules.get(module_name)
+                sys.modules[module_name] = module
+                try:
+                    spec.loader.exec_module(module)
+                finally:
+                    if previous is not None:
+                        sys.modules[module_name] = previous
+                    else:
+                        sys.modules.pop(module_name, None)
+                return module
     raise ImportError(f"Could not find compiled extension for {module_name!r}")
 
 
@@ -168,7 +170,7 @@ def run_dispatcher_checks():
 
 def run_gpu_accel_checks():
     try:
-        accel_gpu = importlib.import_module("accel_gpu")
+        accel_gpu = load_native_extension("accel_gpu")
     except ImportError:
         print("\naccel_gpu not available; GPU-specific checks skipped")
         return None
@@ -219,7 +221,7 @@ def run_gpu_accel_checks():
 
 def run_gpu_simulation_checks(accel_gpu):
     try:
-        simulator_gpu = importlib.import_module("simulator_gpu")
+        simulator_gpu = load_native_extension("simulator_gpu")
     except ImportError:
         print("simulator_gpu not available; GPU simulation checks skipped")
         return
