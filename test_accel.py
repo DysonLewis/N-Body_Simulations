@@ -97,13 +97,13 @@ def build_two_body_orbit():
     return x0, v0, masses, perturb_idx, perturb_pos, perturb_vel, 1.0e-3 * year_seconds, year_seconds
 
 
-def assert_chunk_schema(chunks, expected_rows):
+def assert_chunk_schema(chunks, expected_bodies):
     assert isinstance(chunks, list), "simulation output must be a Python list"
     assert chunks, "simulation output must contain at least one chunk"
     for chunk in chunks:
         assert isinstance(chunk, np.ndarray), "each chunk must be a NumPy array"
         assert chunk.shape[1] == 11, "each chunk must preserve the 11-column schema"
-        assert chunk.shape[0] == expected_rows, "unexpected row count for chunk output"
+        assert chunk.shape[0] % expected_bodies == 0, "chunk row count must be a whole number of timesteps"
         assert np.isfinite(chunk).all(), "chunk output contains non-finite values"
 
 
@@ -256,9 +256,11 @@ def run_gpu_simulation_checks(accel_gpu):
         COLLISION_RADIUS,
     )
 
-    assert_chunk_schema(chunks, expected_rows=len(masses))
+    assert_chunk_schema(chunks, expected_bodies=len(masses))
     expected_chunk_count = math.ceil(max_step / chunk_size)
     assert len(chunks) == expected_chunk_count, "unexpected number of GPU chunks"
+    assert all(chunk.shape[0] == chunk_size * len(masses) for chunk in chunks), \
+        "GPU simulation should log one full step per particle"
 
     initial_radius = np.linalg.norm(x0[0] - x0[1])
     initial_ke = 0.5 * np.sum(masses * np.sum(v0 * v0, axis=1))
@@ -266,12 +268,13 @@ def run_gpu_simulation_checks(accel_gpu):
     initial_total_energy = initial_ke + initial_pe
 
     final_chunk = chunks[-1]
-    final_total_energy = float(np.sum(final_chunk[:, 9] + final_chunk[:, 10]))
+    final_state = final_chunk[-len(masses):]
+    final_total_energy = float(np.sum(final_state[:, 9] + final_state[:, 10]))
     energy_drift = abs(final_total_energy - initial_total_energy) / abs(initial_total_energy)
     print(f"GPU orbital energy drift after {max_step} steps: {energy_drift:.3e}")
     assert energy_drift < 1.0e-2, "GPU simulation exceeded 1% relative energy drift"
 
-    final_positions = final_chunk[:, 3:6]
+    final_positions = final_state[:, 3:6]
     final_accel = accel_gpu.get_accel(final_positions, masses, COLLISION_RADIUS)
     net_force = force_balance_ratio(masses, final_accel)
     print(f"GPU final-state net-force residual: {net_force:.3e}")

@@ -26,6 +26,7 @@ constexpr double VIRIAL_TOLERANCE = 0.03;
 constexpr int VIRIAL_MIN_STEPS = 100000;
 constexpr double VIRIAL_MIN_TIME_YR = 2000.0;
 constexpr int OUTPUT_COLUMNS = 11;
+constexpr double TIME_MATCH_EPS_FACTOR = 1.0e-10;
 
 double compute_adaptive_timestep(
     const std::vector<double>& X,
@@ -134,7 +135,7 @@ bool check_virial_equilibrium(
     return (std::abs(mean - 1.0) < tolerance) && (std_dev < tolerance);
 }
 
-void update_progress_bar(PyObject* pbar, int n) {
+void update_progress_bar(PyObject* pbar, double delta) {
     if (pbar == nullptr || pbar == Py_None) {
         return;
     }
@@ -143,14 +144,14 @@ void update_progress_bar(PyObject* pbar, int n) {
         PyErr_Clear();
         return;
     }
-    PyObject* arg = PyLong_FromLong(n);
+    PyObject* arg = PyFloat_FromDouble(delta);
     PyObject* result = PyObject_CallFunctionObjArgs(update_method, arg, nullptr);
     Py_XDECREF(result);
     Py_DECREF(arg);
     Py_DECREF(update_method);
 }
 
-void set_progress_postfix(PyObject* pbar, double time_yr) {
+void set_progress_postfix(PyObject* pbar, double time_yr, int completed_steps) {
     if (pbar == nullptr || pbar == Py_None) {
         return;
     }
@@ -159,16 +160,21 @@ void set_progress_postfix(PyObject* pbar, double time_yr) {
         PyErr_Clear();
         return;
     }
-    char time_buffer[64];
-    std::snprintf(time_buffer, sizeof(time_buffer), "%.1f yr", time_yr);
-    PyObject* time_str = PyUnicode_FromString(time_buffer);
-    PyObject* result = PyObject_CallFunctionObjArgs(set_postfix, time_str, nullptr);
+    char postfix_buffer[96];
+    std::snprintf(
+        postfix_buffer,
+        sizeof(postfix_buffer),
+        "%.1f yr, %d steps",
+        time_yr,
+        completed_steps);
+    PyObject* postfix_str = PyUnicode_FromString(postfix_buffer);
+    PyObject* result = PyObject_CallFunctionObjArgs(set_postfix, postfix_str, nullptr);
     Py_XDECREF(result);
-    Py_DECREF(time_str);
+    Py_DECREF(postfix_str);
     Py_DECREF(set_postfix);
 }
 
-PyObject* create_progress_bar(int sim_id, int total_steps) {
+PyObject* create_progress_bar(int sim_id, double total_years) {
     PyObject* tqdm_module = PyImport_ImportModule("tqdm");
     if (tqdm_module == nullptr) {
         PyErr_Clear();
@@ -183,12 +189,12 @@ PyObject* create_progress_bar(int sim_id, int total_steps) {
     char desc_buffer[64];
     std::snprintf(desc_buffer, sizeof(desc_buffer), "Simulation %d", sim_id);
     PyObject* kwargs = Py_BuildValue(
-        "{s:i,s:s,s:s,s:O,s:s}",
-        "total", total_steps,
+        "{s:d,s:s,s:s,s:O,s:s}",
+        "total", total_years,
         "desc", desc_buffer,
-        "unit", "step",
+        "unit", "yr",
         "leave", Py_True,
-        "bar_format", "{desc}: {n}/{total} steps | {postfix}");
+        "bar_format", "{desc}: {n:.1f}/{total:.1f} yr | {postfix}");
     PyObject* args = PyTuple_New(0);
     if (kwargs == nullptr || args == nullptr) {
         Py_XDECREF(kwargs);
@@ -222,7 +228,8 @@ void close_progress_bar(PyObject* pbar) {
     Py_DECREF(pbar);
 }
 
-PyArrayObject* build_chunk_array(
+void append_step_records(
+    std::vector<double>& chunk_buffer,
     int sim_id,
     double time_yr,
     const std::vector<double>& X,
@@ -230,13 +237,9 @@ PyArrayObject* build_chunk_array(
     const std::vector<double>& KE,
     const std::vector<double>& PE,
     int N) {
-    npy_intp dims[2] = {static_cast<npy_intp>(N), OUTPUT_COLUMNS};
-    PyArrayObject* chunk_arr =
-        reinterpret_cast<PyArrayObject*>(PyArray_ZEROS(2, dims, NPY_DOUBLE, 0));
-    if (chunk_arr == nullptr) {
-        return nullptr;
-    }
-    double* chunk_data = static_cast<double*>(PyArray_DATA(chunk_arr));
+    const std::size_t base_index = chunk_buffer.size();
+    chunk_buffer.resize(base_index + static_cast<std::size_t>(N) * OUTPUT_COLUMNS);
+    double* chunk_data = chunk_buffer.data() + static_cast<std::ptrdiff_t>(base_index);
     for (int i = 0; i < N; ++i) {
         const int row = i * OUTPUT_COLUMNS;
         chunk_data[row + 0] = static_cast<double>(sim_id);
@@ -250,6 +253,21 @@ PyArrayObject* build_chunk_array(
         chunk_data[row + 8] = V[i * 3 + 2];
         chunk_data[row + 9] = KE[static_cast<std::size_t>(i)];
         chunk_data[row + 10] = PE[static_cast<std::size_t>(i)];
+    }
+}
+
+PyArrayObject* build_chunk_array(const std::vector<double>& chunk_buffer) {
+    const npy_intp row_count =
+        static_cast<npy_intp>(chunk_buffer.size() / static_cast<std::size_t>(OUTPUT_COLUMNS));
+    npy_intp dims[2] = {row_count, OUTPUT_COLUMNS};
+    PyArrayObject* chunk_arr =
+        reinterpret_cast<PyArrayObject*>(PyArray_ZEROS(2, dims, NPY_DOUBLE, 0));
+    if (chunk_arr == nullptr) {
+        return nullptr;
+    }
+    double* chunk_data = static_cast<double*>(PyArray_DATA(chunk_arr));
+    if (!chunk_buffer.empty()) {
+        std::copy(chunk_buffer.begin(), chunk_buffer.end(), chunk_data);
     }
     return chunk_arr;
 }
@@ -277,10 +295,14 @@ PyObject* run_simulation_impl([[maybe_unused]] PyObject* self, PyObject* args) {
     std::vector<double> M_cpu;
     std::vector<double> KE_cpu;
     std::vector<double> PE_cpu;
+    std::vector<double> chunk_buffer;
     std::deque<double> virial_ratios;
     const double* X0_data = nullptr;
     const double* V0_data = nullptr;
     const double* M_data = nullptr;
+    double target_time = 0.0;
+    double target_time_yr = 0.0;
+    double pending_progress_yr = 0.0;
 
     if (!PyArg_ParseTuple(
             args,
@@ -340,12 +362,15 @@ PyObject* run_simulation_impl([[maybe_unused]] PyObject* self, PyObject* args) {
             "max_step must be non-negative and chunk_size, dt, yr, and collision_radius must be positive");
         goto fail;
     }
+    target_time = dt * static_cast<double>(max_step);
+    target_time_yr = target_time / yr;
 
     X_cpu.resize(static_cast<std::size_t>(N) * 3);
     V_cpu.resize(static_cast<std::size_t>(N) * 3);
     M_cpu.resize(static_cast<std::size_t>(N));
     KE_cpu.assign(static_cast<std::size_t>(N), 0.0);
     PE_cpu.assign(static_cast<std::size_t>(N), 0.0);
+    chunk_buffer.reserve(static_cast<std::size_t>(chunk_size) * N * OUTPUT_COLUMNS);
 
     X0_data = static_cast<const double*>(PyArray_DATA(X0_arr));
     V0_data = static_cast<const double*>(PyArray_DATA(V0_arr));
@@ -364,20 +389,20 @@ PyObject* run_simulation_impl([[maybe_unused]] PyObject* self, PyObject* args) {
     if (all_chunks == nullptr) {
         goto simulation_fail;
     }
-    pbar = create_progress_bar(sim_id, max_step);
+    pbar = create_progress_bar(sim_id, target_time_yr);
 
-    while (completed_steps < max_step) {
+    while (t < target_time) {
         const double current_dt = compute_adaptive_timestep(X_cpu, V_cpu, N, dt, collision_radius);
-        const int steps_this_chunk = std::min(chunk_size, max_step - completed_steps);
-        for (int s = 0; s < steps_this_chunk; ++s) {
-            if (!gpu_launch_halfkick(ds, current_dt) ||
-                !gpu_launch_drift(ds, current_dt) ||
-                !gpu_launch_force(ds, collision_radius) ||
-                !gpu_launch_fullkick(ds, current_dt) ||
-                !gpu_launch_ke(ds) ||
-                !gpu_launch_pe(ds, collision_radius)) {
-                goto simulation_fail;
-            }
+        const double remaining_time = target_time - t;
+        const double step_dt = std::min(current_dt, remaining_time);
+
+        if (!gpu_launch_halfkick(ds, step_dt) ||
+            !gpu_launch_drift(ds, step_dt) ||
+            !gpu_launch_force(ds, collision_radius) ||
+            !gpu_launch_fullkick(ds, step_dt) ||
+            !gpu_launch_ke(ds) ||
+            !gpu_launch_pe(ds, collision_radius)) {
+            goto simulation_fail;
         }
         if (!gpu_sync() ||
             !gpu_download(ds, X_cpu.data(), V_cpu.data(), KE_cpu.data(), PE_cpu.data(), N)) {
@@ -395,19 +420,14 @@ PyObject* run_simulation_impl([[maybe_unused]] PyObject* self, PyObject* args) {
             }
         }
 
-        completed_steps += steps_this_chunk;
-        t += current_dt * static_cast<double>(steps_this_chunk);
+        completed_steps += 1;
+        t += step_dt;
+        if (std::abs(target_time - t) <= target_time * TIME_MATCH_EPS_FACTOR) {
+            t = target_time;
+        }
+        pending_progress_yr += step_dt / yr;
 
-        PyArrayObject* chunk_arr =
-            build_chunk_array(sim_id, t / yr, X_cpu, V_cpu, KE_cpu, PE_cpu, N);
-        if (chunk_arr == nullptr) {
-            goto simulation_fail;
-        }
-        if (PyList_Append(all_chunks, reinterpret_cast<PyObject*>(chunk_arr)) != 0) {
-            Py_DECREF(chunk_arr);
-            goto simulation_fail;
-        }
-        Py_DECREF(chunk_arr);
+        append_step_records(chunk_buffer, sim_id, t / yr, X_cpu, V_cpu, KE_cpu, PE_cpu, N);
 
         double total_ke = 0.0;
         double total_pe = 0.0;
@@ -429,15 +449,37 @@ PyObject* run_simulation_impl([[maybe_unused]] PyObject* self, PyObject* args) {
             }
         }
 
-        update_progress_bar(pbar, steps_this_chunk);
-        set_progress_postfix(pbar, t / yr);
+        if (completed_steps % 100 == 0 || t >= target_time || equilibrium_reached) {
+            update_progress_bar(pbar, pending_progress_yr);
+            set_progress_postfix(pbar, t / yr, completed_steps);
+            pending_progress_yr = 0.0;
+        }
+
+        if (static_cast<int>(chunk_buffer.size() / static_cast<std::size_t>(OUTPUT_COLUMNS)) >=
+                chunk_size * N ||
+            t >= target_time ||
+            equilibrium_reached) {
+            PyArrayObject* chunk_arr = build_chunk_array(chunk_buffer);
+            if (chunk_arr == nullptr) {
+                goto simulation_fail;
+            }
+            if (PyList_Append(all_chunks, reinterpret_cast<PyObject*>(chunk_arr)) != 0) {
+                Py_DECREF(chunk_arr);
+                goto simulation_fail;
+            }
+            Py_DECREF(chunk_arr);
+            chunk_buffer.clear();
+        }
     }
 
-    if (equilibrium_reached && completed_steps < max_step) {
-        update_progress_bar(pbar, max_step - completed_steps);
+    if (equilibrium_reached) {
         std::printf("Virial equilibrium reached at step %d (%.2f years)\n", completed_steps, t / yr);
     } else if (!equilibrium_reached) {
-        std::printf("Maximum steps reached without achieving virial equilibrium\n");
+        std::printf(
+            "Target duration reached without achieving virial equilibrium "
+            "(%.2f years, %d steps)\n",
+            t / yr,
+            completed_steps);
     }
 
     close_progress_bar(pbar);

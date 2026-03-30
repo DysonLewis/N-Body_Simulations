@@ -19,6 +19,7 @@ os.environ['QT_LOGGING_RULES'] = '*.debug=false;qt.qpa.*=false'
 
 # Physical constants in CGS units
 AU = 1.496e13      # astronomical unit in cm
+DEFAULT_PLAYBACK_SECONDS = 30.0
 
 
 class SimulationVisualizer:
@@ -99,6 +100,18 @@ class SimulationVisualizer:
                 self.time_to_row_range[current_time] = (start_row, len(time_col))
             
             print(f"Found {self.n_total_frames} time points")
+
+        if self.n_total_frames > 1:
+            frame_deltas = np.diff(self.all_time_points)
+            positive_deltas = frame_deltas[frame_deltas > 0.0]
+            if len(positive_deltas) > 0:
+                self.median_frame_delta_yr = float(np.median(positive_deltas))
+            else:
+                self.median_frame_delta_yr = 1.0
+            self.total_time_span_yr = float(self.all_time_points[-1] - self.all_time_points[0])
+        else:
+            self.median_frame_delta_yr = 1.0
+            self.total_time_span_yr = 0.0
         
         self.current_time_index = 0
         
@@ -120,7 +133,16 @@ class SimulationVisualizer:
         self.colors = plt.cm.tab10(np.linspace(0, 1, self.N))
         
         # Playback control - speed in years per second
-        self.years_per_second = 1.0  # Start at 1 year per second
+        self.default_years_per_second = max(
+            1.0,
+            self.total_time_span_yr / DEFAULT_PLAYBACK_SECONDS if self.total_time_span_yr > 0.0 else 1.0,
+        )
+        self.min_years_per_second = max(1.0e-3, self.default_years_per_second / 10000.0)
+        self.max_years_per_second = max(
+            self.default_years_per_second * 100.0,
+            self.median_frame_delta_yr * self.target_fps,
+        )
+        self.years_per_second = self.default_years_per_second
         self.last_real_time = time.time()
         self.accumulated_sim_time = 0.0  # How much simulation time we should have shown
         
@@ -282,27 +304,51 @@ class SimulationVisualizer:
         self.ax_slider = self.fig.add_subplot(gs[1, :])
         self.ax_slider.set_title("Playback Speed Control (years per second)", fontsize=10)
         
-        # Create slider: logarithmic scale from 1 yr/s to 1000 yr/s
-        # Slider value is log10(years_per_second), so 0.0 = 1 yr/s, 3.0 = 1000 yr/s
+        slider_min = np.log10(self.min_years_per_second)
+        slider_max = np.log10(self.max_years_per_second)
+        slider_init = np.log10(self.default_years_per_second)
+
+        # Use a log-speed slider so both dense CPU output and sparse GPU chunk output
+        # remain navigable without hard-coding a single years/second range.
         self.speed_slider = Slider(
             ax=self.ax_slider,
-            label='log(speed)',
-            valmin=0.0,
-            valmax=3.0,
-            valinit=0.0,
+            label='log10(speed)',
+            valmin=slider_min,
+            valmax=slider_max,
+            valinit=slider_init,
             color='skyblue'
         )
         
         # Custom slider labels
-        self.ax_slider.text(0.0, -0.5, '1 yr/s', transform=self.ax_slider.transAxes, 
-                           ha='left', va='top', fontsize=9)
-        self.ax_slider.text(0.5, -0.5, '~32 yr/s', transform=self.ax_slider.transAxes,
-                           ha='center', va='top', fontsize=9)
-        self.ax_slider.text(1.0, -0.5, '1000 yr/s', transform=self.ax_slider.transAxes,
-                           ha='right', va='top', fontsize=9)
+        midpoint_speed = 10.0 ** ((slider_min + slider_max) / 2.0)
+        self.ax_slider.text(
+            0.0, -0.5, self._format_speed_label(self.min_years_per_second),
+            transform=self.ax_slider.transAxes, ha='left', va='top', fontsize=9)
+        self.ax_slider.text(
+            0.5, -0.5, self._format_speed_label(midpoint_speed),
+            transform=self.ax_slider.transAxes, ha='center', va='top', fontsize=9)
+        self.ax_slider.text(
+            1.0, -0.5, self._format_speed_label(self.max_years_per_second),
+            transform=self.ax_slider.transAxes, ha='right', va='top', fontsize=9)
         
         # Connect slider to callback
         self.speed_slider.on_changed(self._update_speed)
+
+    def _format_speed_label(self, speed_yr_per_s):
+        """
+        Format playback speed labels compactly across small and very large year ranges.
+
+        Args:
+            speed_yr_per_s: playback speed in years per second
+
+        Returns:
+            Human-readable label string
+        """
+        if speed_yr_per_s >= 1000.0:
+            return f"{speed_yr_per_s:.0f} yr/s"
+        if speed_yr_per_s >= 10.0:
+            return f"{speed_yr_per_s:.1f} yr/s"
+        return f"{speed_yr_per_s:.2f} yr/s"
         
     def _update_speed(self, val):
         """
@@ -459,6 +505,7 @@ class SimulationVisualizer:
         fps = self._calculate_fps()
         stats_str = (f"Time: {current_time:.1f} yr\n"
                     f"Speed: {self.years_per_second:.1f} yr/s\n"
+                    f"Data dt: ~{self.median_frame_delta_yr:.1f} yr/frame\n"
                     f"FPS: {fps:.1f}\n"
                     f"Frame: {self.current_time_index+1}/{self.n_total_frames}")
         self.stats_text.set_text(stats_str)

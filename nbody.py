@@ -41,7 +41,7 @@ TRAIL_LENGTH = 50  # Number of historical positions to keep per particle
 TARGET_FPS = 30    # Target frames per second for animation
 WINDOW_WIDTH = 1400  # Total window width in pixels
 WINDOW_HEIGHT = 800  # Total window height in pixels
-PLOT_STEPS = 100   # Subsample static plots to every Nth step to reduce data density
+MAX_PLOT_TIME_POINTS = 500  # Cap static plots to a manageable number of sampled time points.
 
 DEFAULT_PARTICLES = 20
 DEFAULT_SPHERE_RADIUS_AU = 0.001
@@ -164,8 +164,8 @@ print(f"Particle mass: {particle_mass/Msol:.6e} solar masses")
 print(f"Initial sphere radius: {sphere_radius/AU:.6e} AU")
 print(f"Collision radius: {collision_radius/AU:.6e} AU")
 print(f"Timestep: {dt/yr:.4f} years")
-print(f"Maximum steps: {max_step}")
-print(f"Simulation duration: {max_years} years")
+print(f"Nominal maximum steps: {max_step}")
+print(f"Target simulation duration: {max_years} years")
 print(f"Number of simulations: {n_simulations}")
 print("=" * 60)
 
@@ -238,6 +238,13 @@ def run_and_save_simulation(sim_id, fits_filename, append=False):
         yr,
         collision_radius
     )
+
+    if result_chunks:
+        final_time_yr = float(result_chunks[-1][0, 1])
+        print(
+            f"Simulation {sim_id} produced {len(result_chunks)} stored snapshots "
+            f"through {final_time_yr:.1f} years"
+        )
     
     # Create FITS file with header on first simulation
     if not append:
@@ -405,7 +412,7 @@ def create_static_plots(df, fits_filename):
     """
     import gc
     
-    print(f"\nCreating static plots (subsampling every {PLOT_STEPS} steps)...")
+    print("\nCreating static plots...")
     
     # Read subsampled data directly from FITS file
     # Now each simulation is in a single HDU
@@ -428,8 +435,12 @@ def create_static_plots(df, fits_filename):
         all_times = sorted(sim_data['time_yr'].unique())
     
     # Subsample time points
-    plot_times = set(all_times[::PLOT_STEPS])
-    print(f"Subsampled to {len(plot_times)} time points from {len(all_times)} total")
+    plot_stride = max(1, len(all_times) // MAX_PLOT_TIME_POINTS)
+    plot_times = set(all_times[::plot_stride])
+    print(
+        f"Subsampled to {len(plot_times)} time points from {len(all_times)} total "
+        f"(stride {plot_stride})"
+    )
     
     # Filter to only subsampled times
     first_sim = sim_data[sim_data['time_yr'].isin(plot_times)]
