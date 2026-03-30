@@ -48,8 +48,6 @@ def _load_extension_with_init_name(module_name: str, path: Path) -> ModuleType:
 
 
 def _load_cpu_accel_backend() -> ModuleType:
-    # accel.py shadows the native accel extension, so the CPU module must be loaded
-    # explicitly from its extension file instead of through the normal import path.
     return _load_extension_with_init_name("accel", _find_extension_path("accel"))
 
 

@@ -1,8 +1,9 @@
+import argparse
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
-from accel import get_backend, get_num_threads, run_simulation
+from accel_dispatcher import get_backend, get_num_threads, run_simulation
 from visualize_live import SimulationVisualizer
 from ensemble_analysis import analyze_ensemble
 import os
@@ -27,9 +28,6 @@ G = 6.6743e-8      # gravitational constant in cm^3 g^-1 s^-2
 plot_dir = '/home/dyson/fall25/ASTRO142_Proj3/plots'
 os.makedirs(plot_dir, exist_ok=True)
 
-print(f"Compute backend: {get_backend()}")
-print(f"Compute units: {get_num_threads()}")
-
 
 # Visualization parameters
 TRAIL_LENGTH = 50  # Number of historical positions to keep per particle
@@ -38,14 +36,101 @@ WINDOW_WIDTH = 1400  # Total window width in pixels
 WINDOW_HEIGHT = 800  # Total window height in pixels
 PLOT_STEPS = 100   # Subsample static plots to every Nth step to reduce data density
 
-# Hardcoded parameters, these seem to give a good chance of virial equilibrium 
-N = int(20)
-sphere_radius = float(0.001) * AU
-total_mass = float(1e-18) * Msol
-max_years = float(25000)
-n_simulations = int(1)
-collision_radius_factor = 0.01 # This also proportionally affects the gravitational smoothing factor
-chunk_steps = 10000  # Write results to FITS every N steps to avoid memory overflow
+DEFAULT_PARTICLES = 20
+DEFAULT_SPHERE_RADIUS_AU = 0.001
+DEFAULT_TOTAL_MASS_MSOL = 1e-18
+DEFAULT_MAX_YEARS = 25000.0
+DEFAULT_N_SIMULATIONS = 1
+DEFAULT_COLLISION_RADIUS_FACTOR = 0.01
+DEFAULT_CHUNK_STEPS = 10000
+DEFAULT_TIMESTEP_YEARS = 0.1
+
+
+def parse_args():
+    """Parse runtime configuration so notebook cells can override defaults."""
+    parser = argparse.ArgumentParser(
+        description="Run the N-body simulation with optional runtime overrides."
+    )
+    parser.add_argument(
+        "--particles",
+        type=int,
+        default=DEFAULT_PARTICLES,
+        help=f"Number of particles (default: {DEFAULT_PARTICLES})",
+    )
+    parser.add_argument(
+        "--sphere-radius-au",
+        type=float,
+        default=DEFAULT_SPHERE_RADIUS_AU,
+        help=f"Initial sphere radius in AU (default: {DEFAULT_SPHERE_RADIUS_AU})",
+    )
+    parser.add_argument(
+        "--total-mass-msol",
+        type=float,
+        default=DEFAULT_TOTAL_MASS_MSOL,
+        help=f"Total mass in solar masses (default: {DEFAULT_TOTAL_MASS_MSOL})",
+    )
+    parser.add_argument(
+        "--max-years",
+        type=float,
+        default=DEFAULT_MAX_YEARS,
+        help=f"Simulation duration in years (default: {DEFAULT_MAX_YEARS})",
+    )
+    parser.add_argument(
+        "--n-simulations",
+        type=int,
+        default=DEFAULT_N_SIMULATIONS,
+        help=f"Number of simulations to run (default: {DEFAULT_N_SIMULATIONS})",
+    )
+    parser.add_argument(
+        "--collision-radius-factor",
+        type=float,
+        default=DEFAULT_COLLISION_RADIUS_FACTOR,
+        help=(
+            "Collision radius as a fraction of sphere radius "
+            f"(default: {DEFAULT_COLLISION_RADIUS_FACTOR})"
+        ),
+    )
+    parser.add_argument(
+        "--chunk-steps",
+        type=int,
+        default=DEFAULT_CHUNK_STEPS,
+        help=f"Rows per FITS write chunk (default: {DEFAULT_CHUNK_STEPS})",
+    )
+    parser.add_argument(
+        "--dt-years",
+        type=float,
+        default=DEFAULT_TIMESTEP_YEARS,
+        help=f"Timestep in years (default: {DEFAULT_TIMESTEP_YEARS})",
+    )
+    return parser.parse_args()
+
+
+args = parse_args()
+
+if args.particles <= 0:
+    raise ValueError("--particles must be positive")
+if args.sphere_radius_au <= 0:
+    raise ValueError("--sphere-radius-au must be positive")
+if args.total_mass_msol <= 0:
+    raise ValueError("--total-mass-msol must be positive")
+if args.max_years <= 0:
+    raise ValueError("--max-years must be positive")
+if args.n_simulations <= 0:
+    raise ValueError("--n-simulations must be positive")
+if args.collision_radius_factor <= 0:
+    raise ValueError("--collision-radius-factor must be positive")
+if args.chunk_steps <= 0:
+    raise ValueError("--chunk-steps must be positive")
+if args.dt_years <= 0:
+    raise ValueError("--dt-years must be positive")
+
+N = args.particles
+sphere_radius = args.sphere_radius_au * AU
+total_mass = args.total_mass_msol * Msol
+max_years = args.max_years
+n_simulations = args.n_simulations
+collision_radius_factor = args.collision_radius_factor
+chunk_steps = args.chunk_steps
 
 # # Get simulation parameters from user
 # N = int(input("Enter number of particles: "))
@@ -56,9 +141,12 @@ chunk_steps = 10000  # Write results to FITS every N steps to avoid memory overf
 
 # Calculate derived parameters
 particle_mass = total_mass / N
-dt = 0.1 * yr
+dt = args.dt_years * yr
 max_step = int((max_years * yr) / dt)
 collision_radius = collision_radius_factor * sphere_radius
+
+print(f"Compute backend: {get_backend()}")
+print(f"Compute units: {get_num_threads()}")
 
 print("=" * 60)
 print("N-body simulation")

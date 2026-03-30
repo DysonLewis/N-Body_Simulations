@@ -145,7 +145,7 @@ def run_dispatcher_checks():
     print("\nTesting Python dispatcher")
     print("-" * 50)
 
-    accel_dispatcher = importlib.import_module("accel")
+    accel_dispatcher = importlib.import_module("accel_dispatcher")
     backend = accel_dispatcher.get_backend()
     compute_units = accel_dispatcher.get_num_threads()
     print(f"Active backend: {backend}")
@@ -156,7 +156,7 @@ def run_dispatcher_checks():
     forced_env = os.environ.copy()
     forced_env["NBODY_FORCE_CPU"] = "1"
     forced = subprocess.run(
-        [sys.executable, "-c", "from accel import get_backend; print(get_backend())"],
+        [sys.executable, "-c", "from accel_dispatcher import get_backend; print(get_backend())"],
         cwd=str(MODULE_DIR),
         env=forced_env,
         check=True,
