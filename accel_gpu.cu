@@ -1,5 +1,9 @@
 #define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
 
+#if __CUDACC_VER_MAJOR__ < 13
+typedef double4 double4_16a;
+#endif
+
 #include <Python.h>
 #include <numpy/arrayobject.h>
 
