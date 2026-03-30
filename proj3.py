@@ -2,10 +2,9 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
-from simulator import run_simulation
+from accel import get_backend, get_num_threads, run_simulation
 from visualize_live import SimulationVisualizer
 from ensemble_analysis import analyze_ensemble
-import accel
 import os
 import threading
 from astropy.io import fits
@@ -28,8 +27,8 @@ G = 6.6743e-8      # gravitational constant in cm^3 g^-1 s^-2
 plot_dir = '/home/dyson/fall25/ASTRO142_Proj3/plots'
 os.makedirs(plot_dir, exist_ok=True)
 
-num_threads = accel.get_num_threads()
-print(f"OpenMP threads available: {num_threads}")
+print(f"Compute backend: {get_backend()}")
+print(f"Compute units: {get_num_threads()}")
 
 
 # Visualization parameters
@@ -286,7 +285,7 @@ def background_simulations(fits_filename, start_sim, end_sim):
         pass  # If it fails (e.g., on Windows), just continue
     
     # Limit OpenMP threads for background simulations to leave cores for visualization
-    original_threads = accel.get_num_threads()
+    original_threads = get_num_threads()
     background_threads = max(1, original_threads // 2)  # Use half the threads
     os.environ['OMP_NUM_THREADS'] = str(background_threads)
     print(f"Background simulations using {background_threads}/{original_threads} threads")
