@@ -7,6 +7,7 @@ from accel_dispatcher import get_backend, get_num_threads, run_simulation
 from visualize_live import SimulationVisualizer
 from ensemble_analysis import analyze_ensemble
 import os
+import tempfile
 import threading
 from astropy.io import fits
 from astropy.table import Table
@@ -51,6 +52,7 @@ DEFAULT_N_SIMULATIONS = 1
 DEFAULT_COLLISION_RADIUS_FACTOR = 0.01
 DEFAULT_CHUNK_STEPS = 10000
 DEFAULT_TIMESTEP_YEARS = 0.1
+DEFAULT_FITS_BASENAME = "nbody_simulations.fits"
 
 
 def parse_args():
@@ -59,10 +61,35 @@ def parse_args():
         description="Run the N-body simulation with optional runtime overrides."
     )
     parser.add_argument(
+        "-render",
+        "--render",
+        action="store_true",
+        help=(
+            "Skip the simulation and render an existing FITS file instead. "
+            "Defaults to the most recently modified FITS file in the project directory."
+        ),
+    )
+    parser.add_argument(
+        "--fits-file",
+        type=str,
+        default=None,
+        help="Path to an existing FITS file for --render mode.",
+    )
+    parser.add_argument(
+        "--render-sim",
+        type=int,
+        default=None,
+        help="Simulation ID to render from the FITS file (default: highest completed SIMID).",
+    )
+    parser.add_argument(
+        "-particles",
         "--particles",
         type=int,
-        default=DEFAULT_PARTICLES,
-        help=f"Number of particles (default: {DEFAULT_PARTICLES})",
+        default=None,
+        help=(
+            f"Number of particles to simulate (default: {DEFAULT_PARTICLES}). "
+            "In --render mode, limits how many particles are displayed."
+        ),
     )
     parser.add_argument(
         "--sphere-radius-au",
@@ -113,31 +140,13 @@ def parse_args():
 
 
 args = parse_args()
-
-if args.particles <= 0:
-    raise ValueError("--particles must be positive")
-if args.sphere_radius_au <= 0:
-    raise ValueError("--sphere-radius-au must be positive")
-if args.total_mass_msol <= 0:
-    raise ValueError("--total-mass-msol must be positive")
-if args.max_years <= 0:
-    raise ValueError("--max-years must be positive")
-if args.n_simulations <= 0:
-    raise ValueError("--n-simulations must be positive")
-if args.collision_radius_factor <= 0:
-    raise ValueError("--collision-radius-factor must be positive")
-if args.chunk_steps <= 0:
-    raise ValueError("--chunk-steps must be positive")
-if args.dt_years <= 0:
-    raise ValueError("--dt-years must be positive")
-
-N = args.particles
-sphere_radius = args.sphere_radius_au * AU
-total_mass = args.total_mass_msol * Msol
-max_years = args.max_years
-n_simulations = args.n_simulations
-collision_radius_factor = args.collision_radius_factor
-chunk_steps = args.chunk_steps
+N = DEFAULT_PARTICLES
+sphere_radius = DEFAULT_SPHERE_RADIUS_AU * AU
+total_mass = DEFAULT_TOTAL_MASS_MSOL * Msol
+max_years = DEFAULT_MAX_YEARS
+n_simulations = DEFAULT_N_SIMULATIONS
+collision_radius_factor = DEFAULT_COLLISION_RADIUS_FACTOR
+chunk_steps = DEFAULT_CHUNK_STEPS
 
 # # Get simulation parameters from user
 # N = int(input("Enter number of particles: "))
@@ -148,26 +157,190 @@ chunk_steps = args.chunk_steps
 
 # Calculate derived parameters
 particle_mass = total_mass / N
-dt = args.dt_years * yr
+dt = DEFAULT_TIMESTEP_YEARS * yr
 max_step = int((max_years * yr) / dt)
 collision_radius = collision_radius_factor * sphere_radius
 
-print(f"Compute backend: {get_backend()}")
-print(f"Compute units: {get_num_threads()}")
 
-print("=" * 60)
-print("N-body simulation")
-print("=" * 60)
-print(f"Particles: {N}")
-print(f"Total mass: {total_mass/Msol:.6e} solar masses")
-print(f"Particle mass: {particle_mass/Msol:.6e} solar masses")
-print(f"Initial sphere radius: {sphere_radius/AU:.6e} AU")
-print(f"Collision radius: {collision_radius/AU:.6e} AU")
-print(f"Timestep: {dt/yr:.4f} years")
-print(f"Nominal maximum steps: {max_step}")
-print(f"Target simulation duration: {max_years} years")
-print(f"Number of simulations: {n_simulations}")
-print("=" * 60)
+def validate_simulation_args(parsed_args):
+    """Validate CLI arguments used for simulation runs."""
+    effective_particles = (
+        DEFAULT_PARTICLES if parsed_args.particles is None else parsed_args.particles
+    )
+    if effective_particles <= 0:
+        raise ValueError("--particles must be positive")
+    if parsed_args.sphere_radius_au <= 0:
+        raise ValueError("--sphere-radius-au must be positive")
+    if parsed_args.total_mass_msol <= 0:
+        raise ValueError("--total-mass-msol must be positive")
+    if parsed_args.max_years <= 0:
+        raise ValueError("--max-years must be positive")
+    if parsed_args.n_simulations <= 0:
+        raise ValueError("--n-simulations must be positive")
+    if parsed_args.collision_radius_factor <= 0:
+        raise ValueError("--collision-radius-factor must be positive")
+    if parsed_args.chunk_steps <= 0:
+        raise ValueError("--chunk-steps must be positive")
+    if parsed_args.dt_years <= 0:
+        raise ValueError("--dt-years must be positive")
+    if parsed_args.render_sim is not None and parsed_args.render_sim <= 0:
+        raise ValueError("--render-sim must be positive")
+
+
+def configure_simulation(parsed_args):
+    """Populate module-level simulation parameters from validated CLI args."""
+    global N, sphere_radius, total_mass, max_years, n_simulations
+    global collision_radius_factor, chunk_steps, particle_mass, dt
+    global max_step, collision_radius
+
+    validate_simulation_args(parsed_args)
+
+    N = DEFAULT_PARTICLES if parsed_args.particles is None else parsed_args.particles
+    sphere_radius = parsed_args.sphere_radius_au * AU
+    total_mass = parsed_args.total_mass_msol * Msol
+    max_years = parsed_args.max_years
+    n_simulations = parsed_args.n_simulations
+    collision_radius_factor = parsed_args.collision_radius_factor
+    chunk_steps = parsed_args.chunk_steps
+
+    particle_mass = total_mass / N
+    dt = parsed_args.dt_years * yr
+    max_step = int((max_years * yr) / dt)
+    collision_radius = collision_radius_factor * sphere_radius
+
+
+def get_default_fits_path():
+    """Store the main FITS output alongside the simulation scripts."""
+    return os.path.join(get_project_root(), DEFAULT_FITS_BASENAME)
+
+
+def resolve_fits_path(fits_filename):
+    """Resolve an explicit FITS path against cwd and the project directory."""
+    if os.path.isabs(fits_filename):
+        return fits_filename
+
+    cwd_candidate = os.path.abspath(fits_filename)
+    if os.path.exists(cwd_candidate):
+        return cwd_candidate
+
+    project_candidate = os.path.join(get_project_root(), fits_filename)
+    if os.path.exists(project_candidate):
+        return project_candidate
+
+    return cwd_candidate
+
+
+def find_latest_fits_file():
+    """Find the most recently modified FITS file in cwd or the project directory."""
+    candidate_dirs = [os.getcwd(), get_project_root()]
+    fits_paths = []
+    seen = set()
+
+    for directory in candidate_dirs:
+        if not os.path.isdir(directory):
+            continue
+        for entry in os.listdir(directory):
+            if not entry.lower().endswith(".fits"):
+                continue
+            path = os.path.abspath(os.path.join(directory, entry))
+            if path in seen or not os.path.isfile(path):
+                continue
+            fits_paths.append(path)
+            seen.add(path)
+
+    if not fits_paths:
+        raise FileNotFoundError(
+            "No FITS files found in the current working directory or project directory."
+        )
+
+    return max(fits_paths, key=os.path.getmtime)
+
+
+def get_render_target(fits_filename=None, sim_id=None):
+    """Resolve the FITS file and simulation ID for render-only mode."""
+    resolved_fits = resolve_fits_path(fits_filename) if fits_filename else find_latest_fits_file()
+    if not os.path.exists(resolved_fits):
+        raise FileNotFoundError(f"FITS file not found: {resolved_fits}")
+
+    with fits.open(resolved_fits, memmap=True) as hdul:
+        header = hdul[0].header
+        sphere_radius_cm = header.get("SPHRAD")
+        if sphere_radius_cm is None:
+            raise ValueError(f"FITS header missing SPHRAD: {resolved_fits}")
+
+        completed_sim_ids = []
+        fallback_sim_ids = []
+        for i in range(1, len(hdul)):
+            if "SIMID" not in hdul[i].header:
+                continue
+            current_sim_id = int(hdul[i].header["SIMID"])
+            fallback_sim_ids.append(current_sim_id)
+            if "CHUNKIDX" not in hdul[i].header:
+                completed_sim_ids.append(current_sim_id)
+
+    available_sim_ids = sorted(set(completed_sim_ids or fallback_sim_ids))
+    if not available_sim_ids:
+        raise ValueError(f"No simulation HDUs found in FITS file: {resolved_fits}")
+
+    selected_sim_id = sim_id if sim_id is not None else available_sim_ids[-1]
+    if selected_sim_id not in available_sim_ids:
+        raise ValueError(
+            f"Simulation {selected_sim_id} not found in {resolved_fits}. "
+            f"Available SIMIDs: {available_sim_ids}"
+        )
+
+    return resolved_fits, selected_sim_id, float(sphere_radius_cm)
+
+
+def render_existing_simulation(fits_filename=None, sim_id=None):
+    """Launch the visualizer without running any new simulation."""
+    resolved_fits, selected_sim_id, sphere_radius_cm = get_render_target(
+        fits_filename=fits_filename,
+        sim_id=sim_id,
+    )
+    render_particle_limit = abs(args.particles) if args.particles is not None else None
+
+    print("\n" + "=" * 60)
+    print("Render-only mode")
+    print("=" * 60)
+    print(f"FITS file: {resolved_fits}")
+    print(f"Simulation ID: {selected_sim_id}")
+    print(f"Initial sphere radius: {sphere_radius_cm / AU:.6e} AU")
+    if render_particle_limit is not None:
+        print(f"Render particle limit: {render_particle_limit}")
+    print("Close the visualization window to exit")
+    print("=" * 60)
+
+    visualizer = SimulationVisualizer(
+        resolved_fits,
+        sim_id=selected_sim_id,
+        sphere_radius=sphere_radius_cm,
+        trail_length=TRAIL_LENGTH,
+        target_fps=TARGET_FPS,
+        window_width=WINDOW_WIDTH,
+        window_height=WINDOW_HEIGHT,
+        max_particles=render_particle_limit,
+    )
+    visualizer.run()
+
+
+def print_simulation_banner():
+    """Log the simulation configuration before compute starts."""
+    print(f"Compute backend: {get_backend()}")
+    print(f"Compute units: {get_num_threads()}")
+    print("=" * 60)
+    print("N-body simulation")
+    print("=" * 60)
+    print(f"Particles: {N}")
+    print(f"Total mass: {total_mass/Msol:.6e} solar masses")
+    print(f"Particle mass: {particle_mass/Msol:.6e} solar masses")
+    print(f"Initial sphere radius: {sphere_radius/AU:.6e} AU")
+    print(f"Collision radius: {collision_radius/AU:.6e} AU")
+    print(f"Timestep: {dt/yr:.4f} years")
+    print(f"Nominal maximum steps: {max_step}")
+    print(f"Target simulation duration: {max_years} years")
+    print(f"Number of simulations: {n_simulations}")
+    print("=" * 60)
 
 
 def generate_sphere_particles(N, radius):
@@ -197,6 +370,94 @@ def generate_sphere_particles(N, radius):
                 break
     
     return positions, velocities
+
+
+def get_simulation_chunk_hdus(hdul, sim_id):
+    """Return sorted temporary FITS chunk HDUs for a simulation."""
+    chunk_hdus = []
+    for i in range(1, len(hdul)):
+        header = hdul[i].header
+        if header.get('SIMID') == sim_id and 'CHUNKIDX' in header:
+            chunk_hdus.append((int(header['CHUNKIDX']), i))
+    chunk_hdus.sort(key=lambda item: item[0])
+    return chunk_hdus
+
+
+def combine_simulation_chunks(fits_filename, sim_id, expected_chunk_count=None):
+    """
+    Combine temporary per-chunk HDUs into one simulation HDU using a disk-backed buffer.
+
+    The old implementation loaded every chunk into a Python list and then called
+    ``np.concatenate``. That doubled peak memory usage right at the end of the run.
+    Here we copy chunk HDUs sequentially into a memmap on disk, append the final HDU,
+    and only then remove the temporary chunk HDUs.
+    """
+    import gc
+
+    print(f"Combining temporary chunks into single HDU for simulation {sim_id}...")
+
+    temp_buffer_path = None
+    combined_data = None
+    try:
+        with fits.open(fits_filename, memmap=True) as hdul:
+            chunk_hdus = get_simulation_chunk_hdus(hdul, sim_id)
+            if not chunk_hdus:
+                raise ValueError(f"No temporary chunk HDUs found for simulation {sim_id}")
+            if expected_chunk_count is not None and len(chunk_hdus) != expected_chunk_count:
+                raise ValueError(
+                    f"Expected {expected_chunk_count} chunk HDUs for simulation {sim_id}, "
+                    f"found {len(chunk_hdus)}"
+                )
+
+            first_chunk = hdul[chunk_hdus[0][1]].data
+            total_rows = sum(len(hdul[hdu_idx].data) for _, hdu_idx in chunk_hdus)
+
+            with tempfile.NamedTemporaryFile(
+                prefix=f"sim_{sim_id}_combine_",
+                suffix=".dat",
+                dir=os.path.dirname(os.path.abspath(fits_filename)) or None,
+                delete=False,
+            ) as temp_buffer:
+                temp_buffer_path = temp_buffer.name
+
+            combined_data = np.memmap(
+                temp_buffer_path,
+                dtype=first_chunk.dtype,
+                mode='w+',
+                shape=(total_rows,),
+            )
+
+            write_row = 0
+            with tqdm(
+                total=len(chunk_hdus),
+                desc=f"Combining chunks (sim {sim_id})",
+                unit="chunk",
+                leave=True,
+            ) as pbar:
+                for _, hdu_idx in chunk_hdus:
+                    chunk_data = hdul[hdu_idx].data
+                    next_row = write_row + len(chunk_data)
+                    combined_data[write_row:next_row] = chunk_data
+                    write_row = next_row
+                    pbar.update(1)
+
+            combined_data.flush()
+            del first_chunk
+            gc.collect()
+
+        with fits.open(fits_filename, mode='append', memmap=True) as hdul:
+            final_hdu = fits.BinTableHDU(combined_data)
+            final_hdu.header['SIMID'] = (sim_id, 'Simulation ID number')
+            final_hdu.header['EXTNAME'] = f'SIM_{sim_id}'
+            hdul.append(final_hdu)
+            hdul.flush()
+
+    finally:
+        if combined_data is not None:
+            del combined_data
+            gc.collect()
+        if temp_buffer_path and os.path.exists(temp_buffer_path):
+            os.remove(temp_buffer_path)
 
 
 def run_and_save_simulation(sim_id, fits_filename, append=False):
@@ -264,15 +525,14 @@ def run_and_save_simulation(sim_id, fits_filename, append=False):
     
     # Keep first chunk for visualization
     first_chunk_df = None
-    
-    # Write each chunk as a temporary separate HDU
-    # We'll combine them at the end
-    temp_hdu_indices = []
-    
-    # Process and write chunks one at a time
-    with tqdm(total=len(result_chunks), desc=f"Writing chunks (sim {sim_id})", 
+    chunk_count = len(result_chunks)
+
+    # Process and write chunks one at a time, releasing each chunk array immediately
+    # after its FITS HDU has been flushed to disk.
+    with tqdm(total=chunk_count, desc=f"Writing chunks (sim {sim_id})", 
               unit="chunk", leave=True) as pbar:
-        for chunk_idx, chunk_array in enumerate(result_chunks):
+        for chunk_idx in range(chunk_count):
+            chunk_array = result_chunks[chunk_idx]
             # Convert chunk to DataFrame
             df_chunk = pd.DataFrame(chunk_array, columns=[
                 "simulation", "time_yr", "body_idx",
@@ -300,51 +560,22 @@ def run_and_save_simulation(sim_id, fits_filename, append=False):
                 hdul.append(table_hdu)
                 hdul.flush()
             
-            # Clean up this chunk
+            # Drop all references to this chunk before moving to the next one.
+            result_chunks[chunk_idx] = None
+            del chunk_array
             del df_chunk
             del table
             del table_hdu
             gc.collect()
             
             pbar.update(1)
-    
-    # Now combine all temporary chunk HDUs into one final HDU
-    print(f"Combining {len(result_chunks)} chunks into single HDU for simulation {sim_id}...")
-    
-    # Read and concatenate all chunks efficiently
-    with fits.open(fits_filename, mode='update', memmap=True) as hdul:
-        # Find all temporary chunk HDUs for this simulation
-        chunk_hdus = []
-        for i in range(1, len(hdul)):
-            if ('SIMID' in hdul[i].header and 
-                hdul[i].header['SIMID'] == sim_id and
-                'CHUNKIDX' in hdul[i].header):
-                chunk_hdus.append((hdul[i].header['CHUNKIDX'], i))
-        
-        # Sort by chunk index
-        chunk_hdus.sort(key=lambda x: x[0])
-        
-        # Concatenate all chunk data
-        all_data = []
-        for chunk_idx, hdu_idx in chunk_hdus:
-            all_data.append(hdul[hdu_idx].data)
-        
-        combined_data = np.concatenate(all_data)
-        del all_data
-        gc.collect()
-        
-        # Create final HDU with combined data
-        final_hdu = fits.BinTableHDU(combined_data)
-        final_hdu.header['SIMID'] = (sim_id, 'Simulation ID number')
-        final_hdu.header['EXTNAME'] = f'SIM_{sim_id}'
-        
-        # Append final HDU
-        hdul.append(final_hdu)
-        hdul.flush()
-        
-        del combined_data
-        del final_hdu
-        gc.collect()
+
+    del result_chunks
+    gc.collect()
+
+    # Now combine all temporary chunk HDUs into one final HDU without ever keeping the
+    # whole simulation in RAM.
+    combine_simulation_chunks(fits_filename, sim_id, chunk_count)
     
     # Remove temporary chunk HDUs
     print(f"Cleaning up temporary chunks for simulation {sim_id}...")
@@ -555,7 +786,17 @@ def main():
     4. Wait for background simulations to complete
     5. Generate static plots
     """
-    fits_filename = 'nbody_simulations.fits'
+    if args.render:
+        render_existing_simulation(
+            fits_filename=args.fits_file,
+            sim_id=args.render_sim,
+        )
+        return
+
+    configure_simulation(args)
+    print_simulation_banner()
+
+    fits_filename = get_default_fits_path()
     
     # Run first simulation and save to FITS
     print("\n" + "=" * 60)

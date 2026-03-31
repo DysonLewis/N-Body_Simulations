@@ -33,9 +33,9 @@ class SimulationVisualizer:
     Now assumes one HDU per simulation (not one per chunk).
     """
     
-    def __init__(self, fits_filename, sim_id, sphere_radius, visualization_interval=1, 
-                 trail_length=50, target_fps=30, window_width=1400, window_height=800, 
-                 chunk_cache_size=5):
+    def __init__(self, fits_filename, sim_id, sphere_radius, visualization_interval=1,
+                 trail_length=50, target_fps=30, window_width=1400, window_height=800,
+                 chunk_cache_size=5, max_particles=None):
         """
         Initialize the visualization window and data structures.
         
@@ -49,6 +49,7 @@ class SimulationVisualizer:
             window_width: total window width in pixels
             window_height: total window height in pixels
             chunk_cache_size: number of time-based chunks to keep in memory at once
+            max_particles: optional cap on how many bodies to display
         """
         self.fits_filename = fits_filename
         self.sim_id = sim_id
@@ -58,12 +59,19 @@ class SimulationVisualizer:
         self.window_width = window_width
         self.window_height = window_height
         self.chunk_cache_size = chunk_cache_size
+        self.max_particles = max_particles
         
         # Read FITS file to get metadata
         print("Loading simulation metadata from FITS...")
         with fits.open(fits_filename, memmap=True) as hdul:
             # Get number of bodies from header
-            self.N = hdul[0].header['N_BODIES']
+            self.total_bodies = int(hdul[0].header['N_BODIES'])
+            if max_particles is None:
+                self.N = self.total_bodies
+            else:
+                self.N = min(int(max_particles), self.total_bodies)
+                if self.N <= 0:
+                    raise ValueError("max_particles must be positive")
             
             # Find HDU for this simulation
             self.sim_hdu_idx = None
@@ -101,6 +109,11 @@ class SimulationVisualizer:
             
             print(f"Found {self.n_total_frames} time points")
 
+        if self.N < self.total_bodies:
+            print(f"Rendering first {self.N} of {self.total_bodies} particles")
+        else:
+            print(f"Rendering all {self.total_bodies} particles")
+
         if self.n_total_frames > 1:
             frame_deltas = np.diff(self.all_time_points)
             positive_deltas = frame_deltas[frame_deltas > 0.0]
@@ -130,7 +143,7 @@ class SimulationVisualizer:
         self.particle_trails = [deque(maxlen=trail_length) for _ in range(self.N)]
         
         # Particle colors: use colormap for distinct colors
-        self.colors = plt.cm.tab10(np.linspace(0, 1, self.N))
+        self.colors = plt.cm.hsv(np.linspace(0, 1, self.N, endpoint=False))
         
         # Playback control - speed in years per second
         self.default_years_per_second = max(
@@ -253,7 +266,7 @@ class SimulationVisualizer:
             self.trail_collections.append(lc)
         
         # Current particle positions (scatter plot)
-        self.particle_scatter = self.ax_xy.scatter([], [], s=30, c=[self.colors[0]], 
+        self.particle_scatter = self.ax_xy.scatter([], [], s=30, c=[],
                                                    edgecolors='black', linewidths=1.5,
                                                    zorder=10, label='Particles')
         self.particle_scatter.set_offsets(np.empty((0, 2)))
@@ -479,8 +492,16 @@ class SimulationVisualizer:
             return [self.particle_scatter, self.virial_indicator, 
                     self.virial_text, self.stats_text] + self.trail_collections
         
+        display_frame_data = frame_data.sort_values("body_idx")
+        if self.N < self.total_bodies:
+            display_frame_data = display_frame_data[display_frame_data["body_idx"] < self.N]
+
+        if len(display_frame_data) != self.N:
+            return [self.particle_scatter, self.virial_indicator,
+                    self.virial_text, self.stats_text] + self.trail_collections
+
         # Extract positions and energies
-        positions_cm = frame_data[['x_cm', 'y_cm', 'z_cm']].values
+        positions_cm = display_frame_data[['x_cm', 'y_cm', 'z_cm']].values
         positions_au = positions_cm / AU
         KE = frame_data['KE'].values
         PE = frame_data['PE'].values
@@ -491,6 +512,7 @@ class SimulationVisualizer:
         # Update current particle positions
         xy_positions = positions_au[:, :2]
         self.particle_scatter.set_offsets(xy_positions)
+        self.particle_scatter.set_facecolors(self.colors)
         
         # Calculate and update virial ratio
         total_KE = np.sum(KE)
@@ -504,6 +526,7 @@ class SimulationVisualizer:
         # Update stats text
         fps = self._calculate_fps()
         stats_str = (f"Time: {current_time:.1f} yr\n"
+                    f"Particles: {self.N}/{self.total_bodies}\n"
                     f"Speed: {self.years_per_second:.1f} yr/s\n"
                     f"Data dt: ~{self.median_frame_delta_yr:.1f} yr/frame\n"
                     f"FPS: {fps:.1f}\n"
